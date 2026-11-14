@@ -6,7 +6,7 @@ scikit-learn
 librosa
 soundfile
 scenedetect
-opencv-python
+opencv-python-headless
 pandas
 numpy
 yt-dlp
