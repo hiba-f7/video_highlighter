@@ -1,36 +1,68 @@
 import subprocess
 from pathlib import Path
+import streamlit as st
+
+def _get_cookie_file(work_dir: Path) -> Path | None:
+    """Writes YOUTUBE_COOKIES from Streamlit Secrets to a temporary file if configured."""
+    try:
+        if "YOUTUBE_COOKIES" in st.secrets and st.secrets["YOUTUBE_COOKIES"].strip():
+            cookie_path = work_dir / "cookies.txt"
+            cookie_path.write_text(st.secrets["YOUTUBE_COOKIES"], encoding="utf-8")
+            return cookie_path
+    except Exception:
+        pass
+    return None
 
 def download_youtube_video(url: str, work_dir: Path) -> str:
-    """Downloads a YouTube video as MP4 (up to 720p) with cloud-friendly client fallbacks."""
+    """Downloads a YouTube video as MP4 using yt-dlp (with optional cookies) and pytubefix fallback."""
     work_dir.mkdir(parents=True, exist_ok=True)
     video_path = work_dir / "input_video.mp4"
 
     if video_path.exists():
         video_path.unlink()
 
-    # Strip share tracking parameters (?si=...) if present
     clean_url = url.split("?si=")[0] if "?si=" in url else url
+    cookie_path = _get_cookie_file(work_dir)
 
+    # 1. Primary attempt: yt-dlp with cloud-friendly clients & optional cookies
     cmd = [
         "yt-dlp",
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=android,ios,web",
+        "--geo-bypass",
+        "--extractor-args", "youtube:player_client=android,web",
         "-f", "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best",
         "--merge-output-format", "mp4",
         "-o", str(video_path),
-        clean_url,
     ]
+    if cookie_path:
+        cmd.extend(["--cookies", str(cookie_path)])
+    cmd.append(clean_url)
 
     result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0 or not video_path.exists():
-        err_msg = (result.stderr or result.stdout or "Unknown yt-dlp error").strip().splitlines()[-1]
-        raise RuntimeError(
-            f"YouTube download blocked or failed on cloud server ({err_msg}). "
-            "Please use 'Upload MP4 File' in the sidebar or run locally."
-        )
+    if result.returncode == 0 and video_path.exists():
+        return str(video_path)
 
-    return str(video_path)
+    yt_dlp_err = (result.stderr or result.stdout or "").strip()
+
+    # 2. Secondary fallback: pytubefix (works on many cloud IPs without cookies)
+    try:
+        from pytubefix import YouTube
+        yt = YouTube(clean_url, client="WEB")
+        stream = (
+            yt.streams.filter(progressive=True, file_extension="mp4")
+            .order_by("resolution")
+            .desc()
+            .first()
+        )
+        if stream:
+            stream.download(output_path=str(work_dir), filename="input_video.mp4")
+            if video_path.exists():
+                return str(video_path)
+    except Exception as pt_err:
+        yt_dlp_err += f" | pytubefix fallback: {pt_err}"
+
+    last_line = yt_dlp_err.splitlines()[-1] if yt_dlp_err else "Unknown download error"
+    raise RuntimeError(f"YouTube download failed: {last_line}")
 
 def extract_audio(video_path: str, work_dir: Path) -> str:
     """Extracts a 16kHz mono WAV audio track from the input video using FFmpeg."""
