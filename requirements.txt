@@ -10,3 +10,4 @@ opencv-python-headless
 pandas
 numpy
 yt-dlp
+pytubefix
