@@ -7,21 +7,24 @@ import pandas as pd
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 
-def _load_face_cascade() -> cv2.CascadeClassifier:
+def _load_face_cascade():
+    if not hasattr(cv2, "CascadeClassifier"):
+        return None
+
     xml_name = "haarcascade_frontalface_default.xml"
-    
+
     # 1. Try standard cv2.data path if available
     if hasattr(cv2, "data") and hasattr(cv2.data, "haarcascades"):
         candidate = Path(cv2.data.haarcascades) / xml_name
         if candidate.exists():
             return cv2.CascadeClassifier(str(candidate))
-            
+
     # 2. Search inside the installed cv2 package directory
     cv2_dir = Path(cv2.__file__).resolve().parent
     matches = list(cv2_dir.rglob(xml_name))
     if matches:
         return cv2.CascadeClassifier(str(matches[0]))
-        
+
     # 3. Fallback: download directly into /tmp if stripped from wheel
     fallback_path = Path("/tmp") / xml_name
     if not fallback_path.exists():
@@ -85,6 +88,9 @@ def snap_to_scene_boundaries(moment_x: float, buffer_y: float, scenes: list, tot
 
 def analyze_visual_cues(video_path: str, start_sec: float, end_sec: float, sample_fps: int = 1) -> float:
     """Calculates ratio of sampled frames containing clearly visible speaker faces."""
+    if FACE_CASCADE is None or FACE_CASCADE.empty():
+        return 1.0
+
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     frame_interval = max(1, int(video_fps / sample_fps))
