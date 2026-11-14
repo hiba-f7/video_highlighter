@@ -1,11 +1,35 @@
 import warnings
 import logging
+import urllib.request
+from pathlib import Path
 import cv2
 import pandas as pd
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 
-FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+def _load_face_cascade() -> cv2.CascadeClassifier:
+    xml_name = "haarcascade_frontalface_default.xml"
+    
+    # 1. Try standard cv2.data path if available
+    if hasattr(cv2, "data") and hasattr(cv2.data, "haarcascades"):
+        candidate = Path(cv2.data.haarcascades) / xml_name
+        if candidate.exists():
+            return cv2.CascadeClassifier(str(candidate))
+            
+    # 2. Search inside the installed cv2 package directory
+    cv2_dir = Path(cv2.__file__).resolve().parent
+    matches = list(cv2_dir.rglob(xml_name))
+    if matches:
+        return cv2.CascadeClassifier(str(matches[0]))
+        
+    # 3. Fallback: download directly into /tmp if stripped from wheel
+    fallback_path = Path("/tmp") / xml_name
+    if not fallback_path.exists():
+        url = f"https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/{xml_name}"
+        urllib.request.urlretrieve(url, str(fallback_path))
+    return cv2.CascadeClassifier(str(fallback_path))
+
+FACE_CASCADE = _load_face_cascade()
 
 def detect_scenes(video_path: str, threshold: float = 27.0, min_scene_len: int = 15) -> list:
     """Detects visual scene/camera cuts using PySceneDetect ContentDetector."""
