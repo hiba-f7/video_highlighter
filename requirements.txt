@@ -1,0 +1,12 @@
+streamlit
+faster-whisper
+torch
+transformers
+scikit-learn
+librosa
+soundfile
+scenedetect
+opencv-python
+pandas
+numpy
+yt-dlp
