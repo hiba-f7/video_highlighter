@@ -2,48 +2,68 @@ import subprocess
 from pathlib import Path
 import pandas as pd
 
-def filter_non_overlapping(df: pd.DataFrame, top_k: int = 5) -> pd.DataFrame:
-    """Selects top-ranked highlights while preventing overlapping time windows."""
-    selected = []
-    for _, row in df.iterrows():
-        overlap = False
-        for chosen in selected:
-            if not (row["clip_end"] <= chosen["clip_start"] or row["clip_start"] >= chosen["clip_end"]):
-                overlap = True
-                break
-        if not overlap:
-            selected.append(row.to_dict())
-        if len(selected) >= top_k:
-            break
-    return pd.DataFrame(selected)
 
-def extract_highlight_clips(df_highlights: pd.DataFrame, video_path: str, output_dir: Path) -> pd.DataFrame:
-    """Slices each highlight interval into browser-ready H.264/AAC MP4 files."""
+def filter_non_overlapping(df: pd.DataFrame, max_clips: int = 5, top_n: int = None) -> pd.DataFrame:
+    """Selects top non-overlapping highlight windows ranked by multimodal score."""
+    if df.empty:
+        return df
+
+    limit = top_n if top_n is not None else max_clips
+    score_col = "final_multimodal_score" if "final_multimodal_score" in df.columns else "nlp_score"
+    df_sorted = df.sort_values(by=score_col, ascending=False).reset_index(drop=True)
+
+    selected = []
+    for _, row in df_sorted.iterrows():
+        s, e = row["clip_start"], row["clip_end"]
+        overlap = any(not (e <= sel["clip_start"] or s >= sel["clip_end"]) for sel in selected)
+        if not overlap:
+            selected.append(row)
+        if len(selected) >= limit:
+            break
+
+    return pd.DataFrame(selected).reset_index(drop=True)
+
+
+def extract_highlight_clips(video_path: str, df_highlights: pd.DataFrame, output_dir: Path) -> pd.DataFrame:
+    """Cuts each highlight window from the source video using FFmpeg."""
     if df_highlights.empty:
         return df_highlights
 
-    for cat in ["QA", "Agreement", "Disagreement"]:
-        (output_dir / cat).mkdir(parents=True, exist_ok=True)
-
+    output_dir.mkdir(parents=True, exist_ok=True)
     clip_paths = []
+
     for idx, row in df_highlights.iterrows():
-        filename = f"clip_{idx+1:02d}_{row['type']}_{int(row['clip_duration'])}s.mp4"
-        out_path = output_dir / row["type"] / filename
+        start_sec = float(row["clip_start"])
+        duration_sec = float(row["clip_end"]) - start_sec
+        cat = str(row.get("category", "clip")).lower()
+        out_file = output_dir / f"highlight_{idx + 1}_{cat}.mp4"
 
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(row["clip_start"]),
-            "-to", str(row["clip_end"]),
-            "-i", video_path,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            str(out_path),
-            "-loglevel", "error"
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(start_sec),
+            "-i",
+            video_path,
+            "-t",
+            str(duration_sec),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            str(out_file),
+            "-loglevel",
+            "error",
         ]
         subprocess.run(cmd, check=True)
-        clip_paths.append(str(out_path))
+        clip_paths.append(str(out_file))
 
-    df_result = df_highlights.copy()
-    df_result["clip_path"] = clip_paths
-    return df_result
+    df_out = df_highlights.copy()
+    df_out["clip_path"] = clip_paths
+    return df_out
