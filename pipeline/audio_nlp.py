@@ -6,8 +6,28 @@ import pandas as pd
 from faster_whisper import WhisperModel
 from transformers import pipeline
 
+QUESTION_STARTERS = (
+    "what", "why", "how", "when", "where", "who", "whom", "whose", "which",
+    "do ", "does ", "did ", "is ", "are ", "was ", "were ", "can ", "could ",
+    "would ", "will ", "should ", "have ", "has ", "had ", "isn't", "aren't",
+    "don't", "doesn't", "didn't", "won't", "wouldn't", "i wonder", "tell me",
+)
 
-def transcribe_and_merge(audio_path: str, device: str = "cpu") -> pd.DataFrame:
+AGREEMENT_CUES = (
+    "i agree", "totally agree", "completely agree", "exactly", "precisely",
+    "that's right", "that is right", "you're right", "you are right",
+    "absolutely", "definitely", "for sure", "of course", "makes sense",
+    "i think so too", "same here", "spot on", "true,", "yes,", "yeah,",
+)
+
+DISAGREEMENT_CUES = (
+    "i disagree", "don't agree", "do not agree", "not true", "that's not",
+    "that is not", "on the contrary", "no,", "but the thing is", "however,",
+    "i don't think", "i do not think", "wrong", "mistaken", "push back",
+)
+
+
+def transcribe_and_merge(audio_path: str) -> pd.DataFrame:
     """Loads Whisper-tiny, transcribes pre-decoded 16kHz audio array, and frees RAM."""
     whisper_model = WhisperModel(
         "tiny",
@@ -16,7 +36,6 @@ def transcribe_and_merge(audio_path: str, device: str = "cpu") -> pd.DataFrame:
         cpu_threads=2,
         num_workers=1,
     )
-    # Decode via librosa to bypass faster-whisper's internal PyAV/av.open() call
     audio_array, _ = librosa.load(audio_path, sr=16000)
     segments, _ = whisper_model.transcribe(audio_array, vad_filter=True)
 
@@ -28,7 +47,6 @@ def transcribe_and_merge(audio_path: str, device: str = "cpu") -> pd.DataFrame:
     del whisper_model
     gc.collect()
 
-    # Merge short fragments into complete sentence units
     merged = []
     buf_text, buf_start, buf_end = "", None, None
     for seg in raw_segs:
@@ -36,7 +54,7 @@ def transcribe_and_merge(audio_path: str, device: str = "cpu") -> pd.DataFrame:
             buf_start = seg["start"]
         buf_text = (buf_text + " " + seg["text"]).strip()
         buf_end = seg["end"]
-        if re.search(r"[.?!]$", buf_text) or (buf_end - buf_start) >= 12.0:
+        if re.search(r"[.?!]$", buf_text) or (buf_end - buf_start) >= 14.0:
             merged.append({"start": buf_start, "end": buf_end, "text": buf_text})
             buf_text, buf_start, buf_end = "", None, None
 
@@ -47,7 +65,7 @@ def transcribe_and_merge(audio_path: str, device: str = "cpu") -> pd.DataFrame:
 
 
 def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.DataFrame:
-    """Detects questions using punctuation and rising YIN F0 intonation."""
+    """Detects questions using punctuation, interrogative phrasing, and rising YIN F0 pitch."""
     if df_sentences.empty:
         return df_sentences
 
@@ -55,7 +73,11 @@ def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.Da
     is_q, pitch_scores = [], []
 
     for _, row in df_sentences.iterrows():
-        q_punct = row["text"].strip().endswith("?")
+        txt = row["text"].strip()
+        low = txt.lower()
+        q_punct = txt.endswith("?")
+        q_lex = low.startswith(QUESTION_STARTERS) or " i wonder " in low
+
         s_idx, e_idx = int(row["start"] * sr), int(row["end"] * sr)
         clip = y[s_idx:e_idx]
         p_rise = 0.0
@@ -68,8 +90,9 @@ def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.Da
                 diff = np.mean(f0[mid:]) - np.mean(f0[:mid])
                 p_rise = float(np.clip(diff / 30.0, 0.0, 1.0))
 
-        is_q.append(q_punct or p_rise > 0.45)
-        pitch_scores.append(round(1.0 if q_punct else p_rise, 2))
+        is_question = bool(q_punct or q_lex or p_rise > 0.55)
+        is_q.append(is_question)
+        pitch_scores.append(round(1.0 if (q_punct or q_lex) else p_rise, 2))
 
     df_sentences["is_question"] = is_q
     df_sentences["pitch_score"] = pitch_scores
@@ -77,8 +100,21 @@ def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.Da
 
 
 def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: list) -> pd.DataFrame:
-    """Runs compact DistilBERT-MNLI on speaker turn transitions and frees RAM immediately."""
+    """Strictly classifies cross-speaker exchanges into QA, Agreement, or Disagreement; drops uncertain turns."""
     if df_sentences.empty or len(df_sentences) < 2:
+        return pd.DataFrame()
+
+    turns = []
+    for _, row in df_sentences.iterrows():
+        if turns and turns[-1]["speaker"] == row["speaker"]:
+            turns[-1]["end"] = row["end"]
+            turns[-1]["text"] += " " + row["text"]
+            turns[-1]["is_question"] = turns[-1]["is_question"] or row["is_question"]
+        else:
+            turns.append(dict(row))
+
+    df_turns = pd.DataFrame(turns)
+    if len(df_turns) < 2:
         return pd.DataFrame()
 
     nli = pipeline(
@@ -87,43 +123,57 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
         device=-1,
     )
     labels = [
-        "direct question and informative answer",
-        "strong agreement and consensus",
-        "disagreement and debate",
+        "speaker agrees and confirms the other person's point",
+        "speaker disagrees, challenges, or argues against the other person",
+        "informative explanation answering a question",
     ]
-    label_map = {
-        "direct question and informative answer": "QA",
-        "strong agreement and consensus": "Agreement",
-        "disagreement and debate": "Disagreement",
-    }
-
-    candidates = []
-    for i in range(len(df_sentences) - 1):
-        curr_row = df_sentences.iloc[i]
-        next_row = df_sentences.iloc[i + 1]
-        if curr_row["speaker"] != next_row["speaker"] or curr_row["is_question"]:
-            candidates.append((curr_row, next_row))
-    candidates = candidates[:25]
 
     moments = []
-    for curr_row, next_row in candidates:
-        pair_text = f"{curr_row['text']} {next_row['text']}"
+    for i in range(len(df_turns) - 1):
+        t1 = df_turns.iloc[i]
+        t2 = df_turns.iloc[i + 1]
+
+        if t1["speaker"] == t2["speaker"]:
+            continue
+        if (t2["end"] - t2["start"]) < 2.5:
+            continue
+
+        resp_low = t2["text"].lower()
+        pair_text = f"Speaker A: {t1['text']} | Speaker B: {t2['text']}"
         res = nli(pair_text, candidate_labels=labels)
-        top_cat = label_map[res["labels"][0]]
-        top_score = float(res["scores"][0])
+        scores_by_label = dict(zip(res["labels"], res["scores"]))
 
-        if top_cat == "QA" and curr_row["is_question"]:
-            top_score = min(1.0, top_score + 0.15)
+        agree_score = float(scores_by_label[labels[0]])
+        disagree_score = float(scores_by_label[labels[1]])
+        qa_score = float(scores_by_label[labels[2]])
 
-        if top_cat in selected_categories and top_score >= 0.45:
+        has_agree_cue = any(cue in resp_low for cue in AGREEMENT_CUES)
+        has_disagree_cue = any(cue in resp_low for cue in DISAGREEMENT_CUES)
+
+        category = None
+        final_conf = 0.0
+
+        if t1["is_question"] and not has_disagree_cue and qa_score >= 0.45:
+            category = "QA"
+            final_conf = round(min(0.99, qa_score + 0.20), 3)
+        elif (has_agree_cue and agree_score >= 0.55) or agree_score >= 0.78:
+            category = "Agreement"
+            final_conf = round(min(0.99, agree_score + (0.15 if has_agree_cue else 0.0)), 3)
+        elif (has_disagree_cue and disagree_score >= 0.60) or disagree_score >= 0.82:
+            category = "Disagreement"
+            final_conf = round(min(0.99, disagree_score + (0.10 if has_disagree_cue else 0.0)), 3)
+
+        if category and category in selected_categories and final_conf >= 0.72:
             moments.append(
                 {
-                    "moment_x": round((curr_row["end"] + next_row["start"]) / 2.0, 2),
-                    "category": top_cat,
-                    "nlp_score": round(top_score, 3),
-                    "trigger_text": curr_row["text"],
-                    "response_text": next_row["text"],
-                    "speakers": f"{curr_row['speaker']} → {next_row['speaker']}",
+                    "exchange_start": float(t1["start"]),
+                    "exchange_end": float(t2["end"]),
+                    "moment_x": round((t1["end"] + t2["start"]) / 2.0, 2),
+                    "category": category,
+                    "nlp_score": final_conf,
+                    "trigger_text": t1["text"],
+                    "response_text": t2["text"],
+                    "speakers": f"{t1['speaker']} → {t2['speaker']}",
                 }
             )
 
