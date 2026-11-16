@@ -1,315 +1,242 @@
-import shutil
 import tempfile
 from pathlib import Path
-import torch
-import pandas as pd
 import streamlit as st
 
 from pipeline.downloader import download_youtube_video, extract_audio, get_video_duration
-from pipeline.audio_nlp import load_asr_and_nli, transcribe_and_merge, detect_moments
-from pipeline.diarization import load_wavlm_model, assign_speakers
+from pipeline.audio_nlp import transcribe_and_merge, detect_pitch_questions, detect_highlight_moments
+from pipeline.diarization import assign_speakers
 from pipeline.vision import enrich_with_vision
 from pipeline.cutter import filter_non_overlapping, extract_highlight_clips
 
 st.set_page_config(
     page_title="EchoFrame | Multimodal Content & Reaction Analyzer",
-    page_icon="🎭",
-    layout="wide"
+    page_icon="🔍",
+    layout="wide",
 )
 
-# Custom CSS for gradient hero, colored category badges, and styled cards
-st.markdown("""
-<style>
-    .hero-box {
-        background: linear-gradient(135deg, #1E1B4B 0%, #312E81 50%, #0F172A 100%);
-        border: 1px solid #4338CA;
+# Custom Dark Creator Studio Styling
+st.markdown(
+    """
+    <style>
+    .hero-card {
+        background: linear-gradient(135deg, #131B2E 0%, #1E293B 100%);
+        border: 1px solid #2E3A59;
         border-radius: 14px;
         padding: 24px 28px;
         margin-bottom: 20px;
     }
     .hero-title {
-        font-size: 2.1rem;
-        font-weight: 800;
-        background: linear-gradient(90deg, #38BDF8, #818CF8, #F472B6);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        font-size: 1.9rem;
+        font-weight: 700;
+        color: #F8FAFC;
         margin-bottom: 6px;
     }
     .hero-sub {
-        color: #CBD5E1;
-        font-size: 1.02rem;
+        font-size: 0.98rem;
+        color: #94A3B8;
         margin-bottom: 14px;
     }
+    .pill-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
     .tech-pill {
-        display: inline-block;
-        background: rgba(99, 102, 241, 0.2);
+        background-color: rgba(99, 102, 241, 0.15);
         border: 1px solid #6366F1;
-        color: #C7D2FE;
+        color: #A5B4FC;
         padding: 4px 12px;
         border-radius: 999px;
         font-size: 0.8rem;
-        margin-right: 8px;
+        font-weight: 600;
     }
-    .step-card {
-        background: #1E293B;
-        border-top: 3px solid #06B6D4;
-        border-radius: 10px;
-        padding: 16px;
-        height: 100%;
-    }
-    .badge-QA {
-        background: rgba(139, 92, 246, 0.2);
-        color: #C4B5FD;
-        border: 1px solid #8B5CF6;
+    .badge-qa {
+        background-color: rgba(56, 189, 248, 0.18);
+        color: #38BDF8;
+        border: 1px solid #38BDF8;
         padding: 3px 10px;
         border-radius: 6px;
         font-weight: 700;
-        font-size: 0.85rem;
+        font-size: 0.8rem;
     }
-    .badge-Agreement {
-        background: rgba(16, 185, 129, 0.2);
-        color: #6EE7B7;
-        border: 1px solid #10B981;
+    .badge-agree {
+        background-color: rgba(52, 211, 153, 0.18);
+        color: #34D399;
+        border: 1px solid #34D399;
         padding: 3px 10px;
         border-radius: 6px;
         font-weight: 700;
-        font-size: 0.85rem;
+        font-size: 0.8rem;
     }
-    .badge-Disagreement {
-        background: rgba(244, 63, 94, 0.2);
-        color: #FDA4AF;
-        border: 1px solid #F43F5E;
+    .badge-disagree {
+        background-color: rgba(251, 113, 133, 0.18);
+        color: #FB7185;
+        border: 1px solid #FB7185;
         padding: 3px 10px;
         border-radius: 6px;
         font-weight: 700;
-        font-size: 0.85rem;
+        font-size: 0.8rem;
     }
-    .speaker-0 { color: #38BDF8; font-weight: 700; }
-    .speaker-1 { color: #F472B6; font-weight: 700; }
-</style>
-""", unsafe_allow_html=True)
-
-@st.cache_resource
-def get_models():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    whisper_model, nli_classifier = load_asr_and_nli(device=device)
-    wavlm_extractor, wavlm_model = load_wavlm_model(device=device)
-    return device, whisper_model, nli_classifier, wavlm_extractor, wavlm_model
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # Hero Banner
-st.markdown("""
-<div class="hero-box">
-    <div class="hero-title">AI Interview & Podcast Highlight Studio</div>
-    <div class="hero-sub">
-        Multimodal video intelligence that automatically extracts 30–60s shareable clips of key 
-        <b>Q&A</b>, <b>Agreements</b>, and <b>Disagreements</b> snapped cleanly to camera transitions.
+st.markdown(
+    """
+    <div class="hero-card">
+        <div class="hero-title">EchoFrame: Multimodal Content & Reaction Analyzer</div>
+        <div class="hero-sub">
+            AI-driven media intelligence for podcasts, interviews, and talk shows—automatically extracting
+            30–60s highlights of key <b>Q&A</b>, <b>Agreements</b>, and <b>Disagreements</b> snapped cleanly to camera transitions.
+        </div>
+        <div class="pill-row">
+            <span class="tech-pill">Faster-Whisper ASR</span>
+            <span class="tech-pill">WavLM + KMeans Diarization</span>
+            <span class="tech-pill">DistilBERT-MNLI + YIN Pitch</span>
+            <span class="tech-pill">PySceneDetect + OpenCV</span>
+        </div>
     </div>
-    <span class="tech-pill">Faster-Whisper ASR</span>
-    <span class="tech-pill">WavLM + KMeans Diarization</span>
-    <span class="tech-pill">BART-MNLI + YIN Pitch</span>
-    <span class="tech-pill">PySceneDetect + OpenCV</span>
-</div>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
 # Sidebar Controls
 with st.sidebar:
     st.header("1. Video Source")
-    input_mode = st.radio("Select Input Method:", ["YouTube URL", "Upload MP4 File"])
+    input_mode = st.radio("Select Input Mode:", ["YouTube URL", "Upload MP4 File"])
 
     youtube_url = ""
     uploaded_file = None
-
     if input_mode == "YouTube URL":
-        youtube_url = st.text_input("Paste Interview URL:", placeholder="https://www.youtube.com/watch?v=...")
+        youtube_url = st.text_input(
+            "Paste Interview URL:",
+            placeholder="https://www.youtube.com/watch?v=...",
+        )
     else:
-        uploaded_file = st.file_uploader("Upload Interview Video", type=["mp4", "mov", "mkv"])
+        uploaded_file = st.file_uploader("Upload Interview MP4:", type=["mp4", "mov", "mkv"])
 
     st.divider()
     st.header("2. Extraction Parameters")
-    buffer_y = st.slider("Context Buffer Window (s)", min_value=15, max_value=30, value=20)
-    top_k = st.slider("Max Clips to Generate", min_value=1, max_value=10, value=5)
-    selected_types = st.multiselect(
+    buffer_window = st.slider("Context Buffer Window (s)", min_value=15, max_value=30, value=20)
+    max_clips = st.slider("Max Clips to Generate", min_value=1, max_value=10, value=5)
+    selected_categories = st.multiselect(
         "Highlight Categories",
         options=["QA", "Agreement", "Disagreement"],
-        default=["QA", "Agreement", "Disagreement"]
+        default=["QA", "Agreement", "Disagreement"],
     )
 
     st.divider()
     run_btn = st.button("Generate Highlights", type="primary", use_container_width=True)
 
-# Pipeline Execution
-if run_btn:
+# Main Execution Area
+if not run_btn:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.info("**1. Speech & Pitch**\n\nFaster-Whisper transcribes dialogue with VAD filtering, while YIN F0 tracks rising intonation at question boundaries.")
+    with c2:
+        st.info("**2. Speaker Clustering**\n\nWavLM extracts voice embeddings and KMeans separates Host vs. Guest turns automatically.")
+    with c3:
+        st.info("**3. Semantic NLI**\n\nDistilBERT-MNLI evaluates cross-speaker responses to detect high-engagement Q&A, Agreements, and Debates.")
+    with c4:
+        st.info("**4. Vision Snapping**\n\nPySceneDetect aligns cuts to camera switches and OpenCV verifies active speaker faces within 30–60s windows.")
+
+    st.caption("👈 Paste a YouTube interview URL or upload an MP4 file in the sidebar and click **Generate Highlights** to begin.")
+else:
     if input_mode == "YouTube URL" and not youtube_url.strip():
-        st.error("Please enter a valid YouTube URL in the sidebar.")
+        st.warning("Please enter a valid YouTube URL in the sidebar.")
         st.stop()
     if input_mode == "Upload MP4 File" and uploaded_file is None:
-        st.error("Please upload an MP4 video file in the sidebar.")
+        st.warning("Please upload an MP4 video file in the sidebar.")
+        st.stop()
+    if not selected_categories:
+        st.warning("Please select at least one highlight category.")
         st.stop()
 
-    if "work_dir" in st.session_state and Path(st.session_state["work_dir"]).exists():
-        shutil.rmtree(st.session_state["work_dir"], ignore_errors=True)
-
-    work_dir = Path(tempfile.mkdtemp(prefix="highlighter_"))
-    st.session_state["work_dir"] = str(work_dir)
+    base_tmp = Path(tempfile.mkdtemp(prefix="echoframe_"))
+    work_dir = base_tmp / "work"
+    output_dir = base_tmp / "outputs"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with st.status("Running Multimodal Highlight Pipeline...", expanded=True) as status:
-        st.write("Loading neural models (Faster-Whisper, WavLM, BART-large-MNLI)...")
-        device, whisper_model, nli_classifier, wavlm_extractor, wavlm_model = get_models()
-
+        st.write("Step 1/5: Preparing video & extracting 16kHz audio...")
         if input_mode == "YouTube URL":
-            st.write("Downloading interview video via yt-dlp...")
             video_path = download_youtube_video(youtube_url.strip(), work_dir)
         else:
-            st.write("Preparing uploaded video...")
             video_path = str(work_dir / "uploaded_video.mp4")
             with open(video_path, "wb") as f:
                 f.write(uploaded_file.read())
 
+        audio_path = extract_audio(video_path, work_dir)
         total_duration = get_video_duration(video_path)
 
-        st.write("Extracting 16kHz mono audio & transcribing dialogue...")
-        audio_path = extract_audio(video_path, work_dir)
-        segments = transcribe_and_merge(audio_path, whisper_model)
+        st.write("Step 2/5: Transcribing speech & analyzing pitch intonation (Whisper-tiny)...")
+        df_sentences = transcribe_and_merge(audio_path)
+        df_sentences = detect_pitch_questions(df_sentences, audio_path)
 
-        st.write("Separating speakers with WavLM embeddings & KMeans...")
-        segments = assign_speakers(audio_path, segments, wavlm_extractor, wavlm_model, device=device)
-        st.session_state["segments"] = segments
+        st.write("Step 3/5: Separating speakers (WavLM + KMeans)...")
+        df_sentences = assign_speakers(df_sentences, audio_path)
 
-        st.write("Scoring Q&A pitch contours & NLI agreement/disagreement turns...")
-        df_moments = detect_moments(segments, audio_path, nli_classifier)
-
-        if not df_moments.empty and selected_types:
-            df_moments = df_moments[df_moments["type"].isin(selected_types)].reset_index(drop=True)
+        st.write("Step 4/5: Classifying Q&A, Agreements & Debates (DistilBERT-MNLI)...")
+        df_moments = detect_highlight_moments(df_sentences, selected_categories)
 
         if df_moments.empty:
-            status.update(label="No matching highlights found.", state="error")
-            st.warning("No conversation turns matched your selected filters.")
+            status.update(label="Analysis complete — no matching highlights found.", state="complete")
+            st.info("No segments exceeded the confidence threshold for the selected categories. Try selecting all categories or testing a longer dialogue video.")
             st.stop()
 
-        st.write("Snapping boundaries to PySceneDetect cuts & verifying speaker faces...")
-        df_enriched = enrich_with_vision(df_moments, video_path, total_duration, buffer_y=float(buffer_y))
-        df_top = filter_non_overlapping(df_enriched, top_k=top_k)
+        st.write("Step 5/5: Snapping camera cuts, scoring faces & rendering MP4 clips...")
+        df_enriched = enrich_with_vision(df_moments, video_path, total_duration, buffer_y=float(buffer_window))
+        df_final = filter_non_overlapping(df_enriched, max_clips=max_clips)
+        df_final = extract_highlight_clips(video_path, df_final, output_dir)
 
-        st.write("Rendering 30–60s H.264 highlight clips with FFmpeg...")
-        df_final = extract_highlight_clips(df_top, video_path, work_dir / "outputs")
-        st.session_state["df_final"] = df_final
+        status.update(label=f"Pipeline Complete! Generated {len(df_final)} highlight clips.", state="complete")
 
-        status.update(label="Highlight Generation Complete!", state="complete", expanded=False)
+    # Summary Metrics
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Video Duration", f"{round(total_duration / 60, 1)} min")
+    m2.metric("Sentences Analyzed", len(df_sentences))
+    m3.metric("Highlights Extracted", len(df_final))
 
-# Display Results OR Rich Pre-Run Overview
-if "df_final" in st.session_state and not st.session_state["df_final"].empty:
-    df_final = st.session_state["df_final"]
-    segments = st.session_state.get("segments", [])
-
-    # KPI Metrics Row
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Clips Extracted", len(df_final))
-    m2.metric("Avg Multimodal Score", f"{df_final['final_multimodal_score'].mean():.2f}")
-    m3.metric("Total Highlight Time", f"{df_final['clip_duration'].sum():.0f}s")
-    m4.metric("Top Category", df_final["type"].mode()[0])
-
-    st.write("")
-    tab_clips, tab_transcript, tab_analytics = st.tabs([
-        "🎬 Highlight Clips",
-        "🎙️ Full Diarized Transcript",
-        "📊 Scores & Export"
-    ])
+    tab_clips, tab_transcript = st.tabs(["🎬 Generated Highlight Clips", "📝 Full Speaker Transcript"])
 
     with tab_clips:
         for idx, row in df_final.iterrows():
-            badge_cls = f"badge-{row['type']}"
+            cat = row["category"]
+            badge_cls = "badge-qa" if cat == "QA" else ("badge-agree" if cat == "Agreement" else "badge-disagree")
+
             with st.container(border=True):
-                c_vid, c_info = st.columns([1.25, 1])
-                with c_vid:
-                    st.video(row["clip_path"])
-                with c_info:
+                col_vid, col_meta = st.columns([1.2, 1.8])
+                with col_vid:
+                    clip_file = row.get("clip_path", "")
+                    if clip_file and Path(clip_file).exists():
+                        st.video(clip_file)
+                        with open(clip_file, "rb") as vf:
+                            st.download_button(
+                                label=f"⬇️ Download Clip #{idx + 1} (.mp4)",
+                                data=vf.read(),
+                                file_name=f"highlight_{idx + 1}_{cat.lower()}.mp4",
+                                mime="video/mp4",
+                                key=f"dl_{idx}",
+                            )
+                with col_meta:
                     st.markdown(
-                        f"### Clip #{idx+1} &nbsp; <span class='{badge_cls}'>{row['type']}</span>",
-                        unsafe_allow_html=True
+                        f"#### Highlight #{idx + 1} &nbsp; <span class='{badge_cls}'>{cat}</span>",
+                        unsafe_allow_html=True,
                     )
                     st.caption(
-                        f"⏱️ {row['clip_start']}s – {row['clip_end']}s ({row['clip_duration']}s)  |  "
-                        f"🎯 Multimodal: **{row['final_multimodal_score']}** "
-                        f"(NLP: {row['nlp_score']} · Vision: {row['visual_score']})"
+                        f"**Window:** {row['clip_start']}s – {row['clip_end']}s ({row['clip_duration']}s) &nbsp;|&nbsp; "
+                        f"**Speakers:** {row['speakers']} &nbsp;|&nbsp; "
+                        f"**Score:** {row['final_multimodal_score']}"
                     )
-                    st.info(row["dialogue"])
-
-                    with open(row["clip_path"], "rb") as f:
-                        st.download_button(
-                            label=f"⬇️ Download Clip #{idx+1} (.mp4)",
-                            data=f,
-                            file_name=Path(row["clip_path"]).name,
-                            mime="video/mp4",
-                            key=f"dl_clip_{idx}",
-                            use_container_width=True
-                        )
+                    st.markdown(f"**Trigger:** *\"{row['trigger_text']}\"*")
+                    st.markdown(f"**Response:** *\"{row['response_text']}\"*")
 
     with tab_transcript:
-        st.subheader("Speaker-Separated Dialogue")
-        if segments:
-            for seg in segments:
-                spk_cls = "speaker-0" if seg["speaker"] == "SPEAKER_0" else "speaker-1"
-                st.markdown(
-                    f"`[{seg['start']:06.2f}s]` <span class='{spk_cls}'>{seg['speaker']}</span>: {seg['text']}",
-                    unsafe_allow_html=True
-                )
-        else:
-            st.info("Transcript will appear here after running the pipeline.")
-
-    with tab_analytics:
-        st.subheader("Category Distribution & Moment Table")
-        st.bar_chart(df_final["type"].value_counts(), color="#6366F1")
-
-        display_cols = ["type", "clip_start", "clip_end", "clip_duration", "nlp_score", "visual_score", "final_multimodal_score", "dialogue"]
-        st.dataframe(df_final[display_cols], use_container_width=True)
-
-        st.download_button(
-            label="📥 Download Full Summary Report (CSV)",
-            data=df_final[display_cols].to_csv(index=False).encode("utf-8"),
-            file_name="interview_highlights_report.csv",
-            mime="text/csv"
+        st.dataframe(
+            df_sentences[["start", "end", "speaker", "is_question", "text"]],
+            use_container_width=True,
+            hide_index=True,
         )
-
-else:
-    # Rich Empty-State Guide before processing a video
-    st.subheader("How the Multimodal Pipeline Works")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown("""
-        <div class="step-card">
-            <h4>1. Speech & Pitch</h4>
-            <p style="color:#CBD5E1;font-size:0.9rem;">
-                <b>Faster-Whisper</b> transcribes dialogue with VAD filtering, while <b>YIN F0</b> tracks rising intonation at question boundaries.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    with c2:
-        st.markdown("""
-        <div class="step-card" style="border-top-color:#8B5CF6;">
-            <h4>2. Speaker Clustering</h4>
-            <p style="color:#CBD5E1;font-size:0.9rem;">
-                <b>WavLM</b> extracts peak-energy voice embeddings and <b>KMeans</b> separates Host vs. Guest turns automatically.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    with c3:
-        st.markdown("""
-        <div class="step-card" style="border-top-color:#10B981;">
-            <h4>3. Semantic NLI</h4>
-            <p style="color:#CBD5E1;font-size:0.9rem;">
-                <b>BART-large-MNLI</b> evaluates cross-speaker responses to detect high-engagement <b>Q&A</b>, <b>Agreements</b>, and <b>Debates</b>.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    with c4:
-        st.markdown("""
-        <div class="step-card" style="border-top-color:#F43F5E;">
-            <h4>4. Vision Snapping</h4>
-            <p style="color:#CBD5E1;font-size:0.9rem;">
-                <b>PySceneDetect</b> aligns cuts to camera switches and <b>OpenCV</b> verifies active speaker faces within 30–60s windows.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.write("")
-    st.info("👈 Paste a YouTube interview URL or upload an MP4 file in the sidebar and click **Generate Highlights** to begin.")
