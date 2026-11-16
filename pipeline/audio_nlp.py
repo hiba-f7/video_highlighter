@@ -1,142 +1,115 @@
+import gc
 import re
-import numpy as np
-import soundfile as sf
 import librosa
+import numpy as np
 import pandas as pd
+import torch
 from faster_whisper import WhisperModel
 from transformers import pipeline
 
-QUESTION_STARTERS = (
-    "who", "what", "when", "where", "why", "how", "is", "are", "was", "were",
-    "do", "does", "did", "can", "could", "would", "should", "will", "have", "has"
-)
+def transcribe_and_merge(audio_path: str, device: str = "cpu") -> pd.DataFrame:
+    """Loads Whisper-tiny, transcribes audio, and immediately frees RAM."""
+    whisper_model = WhisperModel(
+        "tiny",
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=2,
+        num_workers=1,
+    )
+    segments, _ = whisper_model.transcribe(audio_path, vad_filter=True)
+    raw_segs = [
+        {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
+        for s in segments if s.text.strip()
+    ]
+    del whisper_model
+    gc.collect()
 
-AGREE_CUES = ["yes", "yeah", "exactly", "definitely", "absolutely", "i agree", "true", "right", "spot on", "for sure"]
-DISAGREE_CUES = ["no", "actually", "i disagree", "not really", "however", "on the other hand", "i don't think", "but"]
-
-def load_asr_and_nli(device: str = "cpu"):
-    compute_type = "float16" if device == "cuda" else "int8"
-    whisper_model = WhisperModel("small", device=device, compute_type=compute_type)
-    nli_device = 0 if device == "cuda" else -1
-    nli_classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device=nli_device)
-    return whisper_model, nli_classifier
-
-def transcribe_and_merge(audio_path: str, whisper_model) -> list:
-    """Transcribes speech with VAD and merges broken sentence fragments."""
-    raw_segments, _ = whisper_model.transcribe(audio_path, vad_filter=True)
+    # Merge fragments into complete sentences
     merged = []
+    buf_text, buf_start, buf_end = "", None, None
+    for seg in raw_segs:
+        if buf_start is None:
+            buf_start = seg["start"]
+        buf_text = (buf_text + " " + seg["text"]).strip()
+        buf_end = seg["end"]
+        if re.search(r"[.?!]$", buf_text) or (buf_end - buf_start) >= 12.0:
+            merged.append({"start": buf_start, "end": buf_end, "text": buf_text})
+            buf_text, buf_start, buf_end = "", None, None
+    if buf_text:
+        merged.append({"start": buf_start, "end": buf_end, "text": buf_text})
 
-    for seg in raw_segments:
-        text = seg.text.strip()
-        if not text:
-            continue
+    return pd.DataFrame(merged)
 
-        if not merged:
-            merged.append({"start": round(seg.start, 2), "end": round(seg.end, 2), "text": text})
-            continue
+def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.DataFrame:
+    """Detects questions using punctuation and rising YIN F0 intonation."""
+    if df_sentences.empty:
+        return df_sentences
+    y, sr = librosa.load(audio_path, sr=16000)
+    is_q, pitch_scores = [], []
+    for _, row in df_sentences.iterrows():
+        q_punct = row["text"].strip().endswith("?")
+        s_idx, e_idx = int(row["start"] * sr), int(row["end"] * sr)
+        clip = y[s_idx:e_idx]
+        p_rise = 0.0
+        if len(clip) > sr * 0.5:
+            f0 = librosa.yin(clip, fmin=75, fmax=400, sr=sr)
+            f0 = f0[(f0 > 75) & (f0 < 400)]
+            if len(f0) >= 6:
+                mid = len(f0) // 2
+                diff = np.mean(f0[mid:]) - np.mean(f0[:mid])
+                p_rise = float(np.clip(diff / 30.0, 0.0, 1.0))
+        is_q.append(q_punct or p_rise > 0.45)
+        pitch_scores.append(round(1.0 if q_punct else p_rise, 2))
+    df_sentences["is_question"] = is_q
+    df_sentences["pitch_score"] = pitch_scores
+    return df_sentences
 
-        prev = merged[-1]
-        gap = seg.start - prev["end"]
-        ends_with_punct = prev["text"].endswith((".", "?", "!"))
+def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: list) -> pd.DataFrame:
+    """Runs compact DistilBERT-MNLI on turn transitions and frees RAM immediately."""
+    if df_sentences.empty or len(df_sentences) < 2:
+        return pd.DataFrame()
 
-        if not ends_with_punct and gap <= 1.2:
-            prev["text"] += " " + text
-            prev["end"] = round(seg.end, 2)
-        else:
-            merged.append({"start": round(seg.start, 2), "end": round(seg.end, 2), "text": text})
-
-    return merged
-
-def check_rising_pitch(wav: np.ndarray, sr: int, start_sec: float, end_sec: float) -> float:
-    """Measures pitch rise in the final 0.8s of an utterance using YIN F0 tracking."""
-    tail_start = max(start_sec, end_sec - 0.8)
-    s_idx, e_idx = int(tail_start * sr), int(end_sec * sr)
-    chunk = wav[s_idx:e_idx]
-    if len(chunk) < int(0.2 * sr):
-        return 0.0
-
-    f0 = librosa.yin(chunk, fmin=75, fmax=400, sr=sr)
-    f0 = f0[~np.isnan(f0)]
-    if len(f0) < 4:
-        return 0.0
-
-    mid = len(f0) // 2
-    first_half = np.median(f0[:mid])
-    second_half = np.median(f0[mid:])
-    return 1.0 if second_half > first_half * 1.05 else 0.0
-
-def detect_moments(segments: list, audio_path: str, nli_classifier) -> pd.DataFrame:
-    """Detects QA, Agreement, and Disagreement moments across cross-speaker turns."""
-    wav, sr = sf.read(audio_path)
-    if wav.ndim > 1:
-        wav = np.mean(wav, axis=1)
+    nli = pipeline(
+        "zero-shot-classification",
+        model="typeform/distilbert-base-uncased-mnli",
+        device=-1,
+    )
+    labels = ["direct question and informative answer", "strong agreement and consensus", "disagreement and debate"]
+    label_map = {
+        "direct question and informative answer": "QA",
+        "strong agreement and consensus": "Agreement",
+        "disagreement and debate": "Disagreement",
+    }
 
     moments = []
-    for i in range(len(segments) - 1):
-        curr_seg = segments[i]
-        next_seg = segments[i + 1]
+    # Cap candidate pairs to top 25 turn transitions so CPU inference finishes in ~10 seconds
+    candidates = []
+    for i in range(len(df_sentences) - 1):
+        curr_row = df_sentences.iloc[i]
+        next_row = df_sentences.iloc[i + 1]
+        if curr_row["speaker"] != next_row["speaker"] or curr_row["is_question"]:
+            candidates.append((curr_row, next_row))
+    candidates = candidates[:25]
 
-        # Enforce cross-speaker turn transition
-        if curr_seg["speaker"] == next_seg["speaker"]:
-            continue
+    for curr_row, next_row in candidates:
+        pair_text = f"{curr_row['text']} {next_row['text']}"
+        res = nli(pair_text, candidate_labels=labels)
+        top_cat = label_map[res["labels"][0]]
+        top_score = float(res["scores"][0])
 
-        turn_gap = next_seg["start"] - curr_seg["end"]
-        if turn_gap > 4.0:
-            continue
+        if top_cat == "QA" and curr_row["is_question"]:
+            top_score = min(1.0, top_score + 0.15)
 
-        text_a = curr_seg["text"]
-        text_b = next_seg["text"]
-        lower_a = text_a.lower().strip()
-        lower_b = text_b.lower().strip()
-        moment_x = round((curr_seg["end"] + next_seg["start"]) / 2.0, 2)
-
-        # 1. Question-Answer Detection
-        is_question_punct = text_a.endswith("?")
-        first_word = re.sub(r"[^\w]", "", lower_a.split()[0]) if lower_a.split() else ""
-        is_question_word = first_word in QUESTION_STARTERS
-        pitch_rise = check_rising_pitch(wav, sr, curr_seg["start"], curr_seg["end"])
-
-        if is_question_punct or (is_question_word and pitch_rise > 0):
-            qa_conf = round(0.75 + (0.15 if is_question_punct else 0.0) + (0.10 * pitch_rise), 3)
+        if top_cat in selected_categories and top_score >= 0.45:
             moments.append({
-                "type": "QA",
-                "moment_x": moment_x,
-                "nlp_score": min(1.0, qa_conf),
-                "speaker_a": curr_seg["speaker"],
-                "speaker_b": next_seg["speaker"],
-                "dialogue": f"[{curr_seg['speaker']}]: {text_a}  -->  [{next_seg['speaker']}]: {text_b}"
-            })
-            continue
-
-        # 2. Agreement vs. Disagreement Detection via BART NLI + Lexical Cues
-        pair_text = f"Speaker 1 said: '{text_a}'. Speaker 2 replied: '{text_b}'."
-        candidate_labels = ["agreement and support", "disagreement and debate", "neutral continuation"]
-        res = nli_classifier(pair_text, candidate_labels)
-        top_label = res["labels"][0]
-        top_score = res["scores"][0]
-
-        has_agree_cue = any(cue in lower_b[:35] for cue in AGREE_CUES)
-        has_disagree_cue = any(cue in lower_b[:35] for cue in DISAGREE_CUES)
-
-        if top_label == "agreement and support" and (top_score >= 0.55 or has_agree_cue):
-            final_nlp = min(1.0, round(top_score + (0.1 if has_agree_cue else 0.0), 3))
-            moments.append({
-                "type": "Agreement",
-                "moment_x": moment_x,
-                "nlp_score": final_nlp,
-                "speaker_a": curr_seg["speaker"],
-                "speaker_b": next_seg["speaker"],
-                "dialogue": f"[{curr_seg['speaker']}]: {text_a}  -->  [{next_seg['speaker']}]: {text_b}"
-            })
-        elif top_label == "disagreement and debate" and (top_score >= 0.55 or has_disagree_cue):
-            final_nlp = min(1.0, round(top_score + (0.1 if has_disagree_cue else 0.0), 3))
-            moments.append({
-                "type": "Disagreement",
-                "moment_x": moment_x,
-                "nlp_score": final_nlp,
-                "speaker_a": curr_seg["speaker"],
-                "speaker_b": next_seg["speaker"],
-                "dialogue": f"[{curr_seg['speaker']}]: {text_a}  -->  [{next_seg['speaker']}]: {text_b}"
+                "moment_x": round((curr_row["end"] + next_row["start"]) / 2.0, 2),
+                "category": top_cat,
+                "nlp_score": round(top_score, 3),
+                "trigger_text": curr_row["text"],
+                "response_text": next_row["text"],
+                "speakers": f"{curr_row['speaker']} → {next_row['speaker']}",
             })
 
+    del nli
+    gc.collect()
     return pd.DataFrame(moments)

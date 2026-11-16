@@ -1,75 +1,45 @@
-import torch
+import gc
+import librosa
 import numpy as np
-import soundfile as sf
+import pandas as pd
+import torch
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import normalize
 from transformers import AutoFeatureExtractor, WavLMForXVector
 
-def load_wavlm_model(device: str = "cpu"):
+
+def assign_speakers(df_sentences: pd.DataFrame, audio_path: str, n_speakers: int = 2) -> pd.DataFrame:
+    """Extracts WavLM speaker embeddings per sentence, clusters via KMeans, and frees RAM."""
+    if df_sentences.empty:
+        return df_sentences
+
     model_name = "microsoft/wavlm-base-plus-sv"
-    feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
-    model = WavLMForXVector.from_pretrained(model_name).to(device)
-    model.eval()
-    return feature_extractor, model
+    extractor = AutoFeatureExtractor.from_pretrained(model_name)
+    wavlm = WavLMForXVector.from_pretrained(model_name)
+    wavlm.eval()
 
-def assign_speakers(audio_path: str, segments: list, feature_extractor, model, device: str = "cpu") -> list:
-    """Assigns SPEAKER_0 or SPEAKER_1 to each merged utterance using RMS peak windowing and KMeans."""
-    if not segments:
-        return segments
-
-    wav, sr = sf.read(audio_path)
-    if wav.ndim > 1:
-        wav = np.mean(wav, axis=1)
-
+    y, sr = librosa.load(audio_path, sr=16000)
     embeddings = []
-    valid_indices = []
-    window_samples = int(3.0 * sr)  # 3-second peak speech window
 
-    for idx, seg in enumerate(segments):
-        start_sample = int(seg["start"] * sr)
-        end_sample = int(seg["end"] * sr)
-        chunk = wav[start_sample:end_sample]
+    with torch.no_grad():
+        for _, row in df_sentences.iterrows():
+            s_idx = int(row["start"] * sr)
+            e_idx = int(row["end"] * sr)
+            clip = y[s_idx:e_idx]
+            if len(clip) < sr * 0.4:
+                clip = np.pad(clip, (0, int(sr * 0.4) - len(clip)))
+            inputs = extractor(clip, sampling_rate=16000, return_tensors="pt")
+            emb = wavlm(**inputs).embeddings.squeeze().numpy()
+            embeddings.append(emb)
 
-        if len(chunk) < int(0.4 * sr):
-            continue
+    del wavlm, extractor
+    gc.collect()
 
-        # Find highest RMS energy 3s sub-window to avoid background music bleed
-        if len(chunk) > window_samples:
-            step = int(0.5 * sr)
-            best_rms = -1.0
-            best_sub = chunk[:window_samples]
-            for pos in range(0, len(chunk) - window_samples + 1, step):
-                sub = chunk[pos:pos + window_samples]
-                rms = np.sqrt(np.mean(sub ** 2))
-                if rms > best_rms:
-                    best_rms = rms
-                    best_sub = sub
-            chunk = best_sub
+    X = np.vstack(embeddings)
+    k = min(n_speakers, len(X))
+    if k > 1:
+        labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X)
+        df_sentences["speaker"] = [f"Speaker {lbl + 1}" for lbl in labels]
+    else:
+        df_sentences["speaker"] = "Speaker 1"
 
-        inputs = feature_extractor(chunk, sampling_rate=sr, return_tensors="pt", padding=True).to(device)
-        with torch.no_grad():
-            emb = model(**inputs).embeddings.cpu().numpy()[0]
-
-        embeddings.append(emb)
-        valid_indices.append(idx)
-
-    if len(embeddings) < 2:
-        for seg in segments:
-            seg["speaker"] = "SPEAKER_0"
-        return segments
-
-    # L2 normalize embeddings before KMeans clustering into 2 speakers
-    norm_embeddings = normalize(np.vstack(embeddings))
-    kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(norm_embeddings)
-
-    idx_to_label = {valid_indices[i]: f"SPEAKER_{labels[i]}" for i in range(len(valid_indices))}
-
-    # Propagate labels (fill short skipped segments with nearest speaker)
-    last_speaker = "SPEAKER_0"
-    for i, seg in enumerate(segments):
-        if i in idx_to_label:
-            last_speaker = idx_to_label[i]
-        seg["speaker"] = last_speaker
-
-    return segments
+    return df_sentences
