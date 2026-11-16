@@ -8,11 +8,10 @@ from transformers import AutoFeatureExtractor, WavLMForXVector
 
 
 def assign_speakers(df_sentences: pd.DataFrame, audio_path: str, n_speakers: int = 2) -> pd.DataFrame:
-    """Extracts WavLM speaker embeddings (using GPU if available), clusters via KMeans, and frees memory."""
+    """Extracts WavLM speaker embeddings (GPU if available), clusters via KMeans, and frees memory."""
     if df_sentences.empty:
         return df_sentences
 
-    # Cap to first 80 sentences so long interviews finish rapidly during live demos
     df_sentences = df_sentences.iloc[:80].copy().reset_index(drop=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
