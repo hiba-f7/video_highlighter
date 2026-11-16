@@ -29,39 +29,25 @@ DISAGREEMENT_CUES = (
 
 
 def transcribe_and_merge(audio_path: str) -> pd.DataFrame:
-    """Transcribes audio on GPU if CUDA 12 cuBLAS is available, with automatic int8 CPU fallback."""
+    """Transcribes audio cleanly using int8 CPU mode (immune to CUDA 12/13 mismatches) and merges complete sentences."""
     audio_array, _ = librosa.load(audio_path, sr=16000)
     max_samples = 16000 * 60 * 8
     if len(audio_array) > max_samples:
         audio_array = audio_array[:max_samples]
 
-    use_gpu = torch.cuda.is_available()
-    try:
-        whisper_model = WhisperModel(
-            "tiny",
-            device="cuda" if use_gpu else "cpu",
-            compute_type="float16" if use_gpu else "int8",
-            cpu_threads=2,
-        )
-        segments, _ = whisper_model.transcribe(audio_array, vad_filter=True, beam_size=1)
-        raw_segs = [
-            {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
-            for s in segments
-            if s.text.strip()
-        ]
-    except RuntimeError:
-        use_gpu = False
-        whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=2)
-        segments, _ = whisper_model.transcribe(audio_array, vad_filter=True, beam_size=1)
-        raw_segs = [
-            {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
-            for s in segments
-            if s.text.strip()
-        ]
-
+    whisper_model = WhisperModel(
+        "tiny",
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=2,
+    )
+    segments, _ = whisper_model.transcribe(audio_array, vad_filter=True, beam_size=1)
+    raw_segs = [
+        {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
+        for s in segments
+        if s.text.strip()
+    ]
     del whisper_model
-    if use_gpu:
-        torch.cuda.empty_cache()
     gc.collect()
 
     merged = []
