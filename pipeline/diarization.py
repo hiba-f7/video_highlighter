@@ -8,13 +8,17 @@ from transformers import AutoFeatureExtractor, WavLMForXVector
 
 
 def assign_speakers(df_sentences: pd.DataFrame, audio_path: str, n_speakers: int = 2) -> pd.DataFrame:
-    """Extracts WavLM speaker embeddings per sentence, clusters via KMeans, and frees RAM."""
+    """Extracts WavLM speaker embeddings (using GPU if available), clusters via KMeans, and frees memory."""
     if df_sentences.empty:
         return df_sentences
 
+    # Cap to first 80 sentences so long interviews finish rapidly during live demos
+    df_sentences = df_sentences.iloc[:80].copy().reset_index(drop=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model_name = "microsoft/wavlm-base-plus-sv"
     extractor = AutoFeatureExtractor.from_pretrained(model_name)
-    wavlm = WavLMForXVector.from_pretrained(model_name)
+    wavlm = WavLMForXVector.from_pretrained(model_name).to(device)
     wavlm.eval()
 
     y, sr = librosa.load(audio_path, sr=16000)
@@ -27,11 +31,13 @@ def assign_speakers(df_sentences: pd.DataFrame, audio_path: str, n_speakers: int
             clip = y[s_idx:e_idx]
             if len(clip) < sr * 0.4:
                 clip = np.pad(clip, (0, int(sr * 0.4) - len(clip)))
-            inputs = extractor(clip, sampling_rate=16000, return_tensors="pt")
-            emb = wavlm(**inputs).embeddings.squeeze().numpy()
+            inputs = extractor(clip, sampling_rate=16000, return_tensors="pt").to(device)
+            emb = wavlm(**inputs).embeddings.squeeze().cpu().numpy()
             embeddings.append(emb)
 
     del wavlm, extractor
+    if device == "cuda":
+        torch.cuda.empty_cache()
     gc.collect()
 
     X = np.vstack(embeddings)
