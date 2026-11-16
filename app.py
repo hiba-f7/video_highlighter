@@ -9,33 +9,57 @@ from pipeline.vision import enrich_with_vision
 from pipeline.cutter import filter_non_overlapping, extract_highlight_clips
 
 CUSTOM_CSS = """
+.gradio-container, .gradio-container * {
+    color: #18313A !important;
+}
 .gradio-container {
-    background: linear-gradient(160deg, #FBF7F6 0%, #F7E0E0 48%, #EEF4F6 100%) !important;
+    background: linear-gradient(160deg, #FBF7F6 0%, #F7E0E0 50%, #EEF4F6 100%) !important;
     font-family: 'Inter', 'Segoe UI', sans-serif !important;
 }
+.gradio-container input, .gradio-container textarea, .gradio-container select {
+    background-color: #FFFFFF !important;
+    color: #18313A !important;
+    border: 1px solid #97B5C2 !important;
+}
+.gradio-container input::placeholder {
+    color: #5C7680 !important;
+}
+.gradio-container label, .gradio-container span, .gradio-container p, .gradio-container th, .gradio-container td {
+    color: #18313A !important;
+}
+.gradio-container .tab-nav button {
+    color: #2E5968 !important;
+    font-weight: 600 !important;
+    background: rgba(255, 255, 255, 0.65) !important;
+}
+.gradio-container .tab-nav button.selected {
+    color: #18313A !important;
+    border-bottom: 3px solid #2E5968 !important;
+    background: #FFFFFF !important;
+}
 .echo-hero {
-    background: linear-gradient(135deg, #2E5968 0%, #3E6E7E 60%, #97B5C2 100%);
+    background: linear-gradient(135deg, #2E5968 0%, #3E6E7E 65%, #97B5C2 100%) !important;
     border: 1px solid #C8B9B1;
     border-radius: 16px;
-    padding: 24px 28px;
-    margin-bottom: 18px;
-    box-shadow: 0 8px 24px rgba(46, 89, 104, 0.14);
+    padding: 22px 26px;
+    margin-bottom: 16px;
+    box-shadow: 0 8px 22px rgba(46, 89, 104, 0.14);
 }
-.echo-hero h1 {
-    color: #FBF7F6 !important;
-    font-size: 1.85rem !important;
+.echo-hero h1, .echo-hero h1 * {
+    color: #FFFFFF !important;
+    font-size: 1.8rem !important;
     margin: 0 0 6px 0 !important;
 }
-.echo-hero p {
+.echo-hero p, .echo-hero p * {
     color: #F7E0E0 !important;
     font-size: 0.96rem !important;
     margin: 0 0 12px 0 !important;
 }
 .echo-pill {
     display: inline-block;
-    background: rgba(247, 224, 224, 0.22);
+    background: rgba(247, 224, 224, 0.24) !important;
     border: 1px solid #F7E0E0;
-    color: #FFFFFF;
+    color: #FFFFFF !important;
     padding: 4px 12px;
     border-radius: 999px;
     font-size: 0.78rem;
@@ -43,32 +67,31 @@ CUSTOM_CSS = """
     margin-right: 6px;
 }
 .clip-card {
-    background: #FFFFFF;
+    background: #FFFFFF !important;
     border: 1px solid #DFC2C0;
     border-left: 5px solid #2E5968;
     border-radius: 12px;
     padding: 14px 16px;
     margin-bottom: 10px;
-    box-shadow: 0 2px 8px rgba(46, 89, 104, 0.06);
 }
-.clip-meta {
-    color: #2E5968;
+.clip-meta, .clip-meta * {
+    color: #2E5968 !important;
     font-weight: 700;
-    font-size: 0.92rem;
+    font-size: 0.94rem;
     margin-bottom: 6px;
 }
-.clip-quote {
-    color: #334155;
+.clip-quote, .clip-quote * {
+    color: #18313A !important;
     font-size: 0.9rem;
     margin-bottom: 4px;
 }
-button.primary {
+button.primary, button.primary * {
     background: #2E5968 !important;
     border-color: #2E5968 !important;
     color: #FFFFFF !important;
 }
 button.primary:hover {
-    background: #234652 !important;
+    background: #18313A !important;
 }
 """
 
@@ -78,14 +101,12 @@ def build_section_outputs(df_cat, title):
         empty_html = (
             f"<div class='clip-card' style='border-left-color:#C8B9B1;'>"
             f"<div class='clip-meta'>No high-confidence {title} exchanges found</div>"
-            f"<div class='clip-quote'>Only verified cross-speaker exchanges passing the 0.72 confidence threshold are shown.</div>"
+            f"<div class='clip-quote'>Only verified cross-speaker exchanges passing the 0.72 confidence threshold are displayed.</div>"
             f"</div>"
         )
         return empty_html, None, gr.update(choices=[], value=None, visible=False), []
 
-    cards = []
-    choices = []
-    paths = []
+    cards, choices, paths = [], [], []
     for idx, row in df_cat.iterrows():
         label = f"Clip #{idx + 1} ({row['clip_start']}s – {row['clip_end']}s | {row['speakers']})"
         choices.append(label)
@@ -106,14 +127,14 @@ def build_section_outputs(df_cat, title):
     )
 
 
-def switch_clip(selected_label, choices_list, paths_list):
-    if not selected_label or not paths_list:
+def _pick_clip(selected_label, paths):
+    if not selected_label or not paths:
         return None
     try:
-        idx = choices_list.index(selected_label)
-        return paths_list[idx]
-    except ValueError:
-        return paths_list[0]
+        idx = int(selected_label.split("#")[1].split(" ")[0]) - 1
+        return paths[idx]
+    except Exception:
+        return paths[0]
 
 
 def run_pipeline(youtube_url, uploaded_video, max_per_category, progress=gr.Progress()):
@@ -135,14 +156,14 @@ def run_pipeline(youtube_url, uploaded_video, max_per_category, progress=gr.Prog
     audio_path = extract_audio(video_path, work_dir)
     total_duration = get_video_duration(video_path)
 
-    progress(0.3, desc="Step 2/5: Transcribing speech & detecting questions (Whisper-tiny + YIN Pitch)...")
+    progress(0.3, desc="Step 2/5: Transcribing speech & detecting questions (Whisper-tiny)...")
     df_sentences = transcribe_and_merge(audio_path)
     df_sentences = detect_pitch_questions(df_sentences, audio_path)
 
-    progress(0.55, desc="Step 3/5: Identifying speaker turns (WavLM + KMeans)...")
+    progress(0.55, desc="Step 3/5: Separating speakers (WavLM + KMeans)...")
     df_sentences = assign_speakers(df_sentences, audio_path)
 
-    progress(0.75, desc="Step 4/5: Filtering high-confidence QA, Agreement & Disagreement turns...")
+    progress(0.75, desc="Step 4/5: Classifying QA, Agreement & Disagreement turns...")
     df_moments = detect_highlight_moments(df_sentences, ["QA", "Agreement", "Disagreement"])
 
     if df_moments.empty:
@@ -155,7 +176,7 @@ def run_pipeline(youtube_url, uploaded_video, max_per_category, progress=gr.Prog
             df_sentences[["start", "end", "speaker", "is_question", "text"]] if not df_sentences.empty else df_sentences,
         )
 
-    progress(0.9, desc="Step 5/5: Snapping camera cuts & cutting exact exchange clips...")
+    progress(0.9, desc="Step 5/5: Cutting exact exchange clips...")
     df_enriched = enrich_with_vision(df_moments, video_path, total_duration, buffer_y=1.5)
 
     sections = {}
@@ -200,7 +221,7 @@ with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="EchoFrame | Multimodal Interv
             <span class="echo-pill">Whisper-tiny ASR + YIN Pitch</span>
             <span class="echo-pill">WavLM + KMeans Diarization</span>
             <span class="echo-pill">DistilBERT-MNLI Semantic Gate</span>
-            <span class="echo-pill">PySceneDetect + OpenCV</span>
+            <span class="echo-pill">OpenCV Face Verification</span>
         </div>
         """
     )
@@ -259,6 +280,5 @@ with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="EchoFrame | Multimodal Interv
     qa_selector.change(fn=_pick_clip, inputs=[qa_selector, qa_paths_state], outputs=qa_video)
     ag_selector.change(fn=_pick_clip, inputs=[ag_selector, ag_paths_state], outputs=ag_video)
     dis_selector.change(fn=_pick_clip, inputs=[dis_selector, dis_paths_state], outputs=dis_video)
-
 if __name__ == "__main__":
     demo.launch(share=True, debug=False)
