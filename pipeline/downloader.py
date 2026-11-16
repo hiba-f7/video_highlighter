@@ -1,9 +1,9 @@
 import subprocess
 from pathlib import Path
-import streamlit as st
+
 
 def download_youtube_video(url: str, work_dir: Path) -> str:
-    """Downloads a YouTube video as MP4 using cookie-free mobile/VR clients and yt-dlp fallback."""
+    """Downloads a YouTube video as MP4 using cookie-free mobile/VR clients with yt-dlp fallback."""
     work_dir.mkdir(parents=True, exist_ok=True)
     video_path = work_dir / "input_video.mp4"
 
@@ -12,7 +12,6 @@ def download_youtube_video(url: str, work_dir: Path) -> str:
 
     clean_url = url.split("?si=")[0] if "?si=" in url else url
 
-    # 1. Try pytubefix with mobile/VR clients first (best cookie-free success on cloud IPs)
     for client_name in ["ANDROID_VR", "MWEB", "IOS", "ANDROID"]:
         try:
             from pytubefix import YouTube
@@ -30,7 +29,6 @@ def download_youtube_video(url: str, work_dir: Path) -> str:
         except Exception:
             continue
 
-    # 2. Fallback to yt-dlp with tv_embedded & mobile clients
     cmd = [
         "yt-dlp",
         "--no-playlist",
@@ -43,12 +41,10 @@ def download_youtube_video(url: str, work_dir: Path) -> str:
     if result.returncode == 0 and video_path.exists():
         return str(video_path)
 
-    # 3. Clean user-friendly message instead of a crashed traceback
-    st.error(
-        "YouTube blocked the cloud server's IP address for this video. "
-        "Please switch to **Upload MP4 File** in the sidebar, or run the app locally (`streamlit run app.py`) where YouTube links download directly."
+    raise RuntimeError(
+        "YouTube blocked this download request. Please upload an MP4 video directly in the 'Or Upload MP4 Clip' box."
     )
-    st.stop()
+
 
 def extract_audio(video_path: str, work_dir: Path) -> str:
     """Extracts a 16kHz mono WAV audio track from the input video using FFmpeg."""
@@ -68,8 +64,9 @@ def extract_audio(video_path: str, work_dir: Path) -> str:
     subprocess.run(cmd, check=True)
     return str(audio_path)
 
+
 def get_video_duration(video_path: str) -> float:
-    """Returns the exact duration of the video in seconds using ffprobe."""
+    """Returns exact video duration in seconds using ffprobe."""
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
