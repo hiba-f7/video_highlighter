@@ -1,8 +1,6 @@
 from pathlib import Path
 import cv2
 import pandas as pd
-from scenedetect import open_video, SceneManager
-from scenedetect.detectors import ContentDetector
 
 
 def _load_face_cascade():
@@ -27,50 +25,22 @@ def _load_face_cascade():
 FACE_CASCADE = _load_face_cascade()
 
 
-def detect_scenes(video_path: str, threshold: float = 27.0, min_scene_len: int = 15) -> list:
-    video = open_video(video_path)
-    scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector(threshold=threshold, min_scene_len=min_scene_len))
-    scene_manager.detect_scenes(video, frame_skip=2)
-    return [(round(s.get_seconds(), 2), round(e.get_seconds(), 2)) for s, e in scene_manager.get_scene_list()]
-
-
-def snap_exchange_boundaries(
-    ex_start: float,
-    ex_end: float,
-    total_duration: float,
-    scene_boundaries: list,
-    pad_sec: float = 1.5,
-    max_dur: float = 35.0,
-) -> tuple:
-    raw_start = max(0.0, ex_start - pad_sec)
-    raw_end = min(total_duration, ex_end + pad_sec)
-
-    cuts = sorted({c for pair in scene_boundaries for c in pair})
-    if cuts:
-        s_cands = [c for c in cuts if abs(c - raw_start) <= 2.0 and c <= ex_start]
-        if s_cands:
-            raw_start = min(s_cands, key=lambda c: abs(c - raw_start))
-
-        e_cands = [c for c in cuts if abs(c - raw_end) <= 2.0 and c >= ex_end]
-        if e_cands:
-            raw_end = min(e_cands, key=lambda c: abs(c - raw_end))
-
-    if (raw_end - raw_start) > max_dur:
-        raw_end = round(raw_start + max_dur, 2)
-
-    return round(raw_start, 2), round(raw_end, 2)
-
-
-def analyze_visual_cues(video_path: str, start_sec: float, end_sec: float, sample_fps: float = 0.5) -> float:
+def analyze_visual_cues(video_path: str, start_sec: float, end_sec: float) -> float:
+    """Checks 4 evenly spaced frames inside the candidate window for visible speaker faces."""
     if FACE_CASCADE is None or FACE_CASCADE.empty():
         return 1.0
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    step = max(1, int(video_fps / sample_fps))
+    s_frame = int(start_sec * video_fps)
+    e_frame = int(end_sec * video_fps)
+    if e_frame <= s_frame:
+        cap.release()
+        return 1.0
+
+    step = max(1, (e_frame - s_frame) // 4)
     frames_checked, faces_detected = 0, 0
 
-    for f_idx in range(int(start_sec * video_fps), int(end_sec * video_fps) + 1, step):
+    for f_idx in range(s_frame, e_frame + 1, step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
         ret, frame = cap.read()
         if not ret:
@@ -90,17 +60,20 @@ def enrich_with_vision(
     video_path: str,
     total_duration: float,
     buffer_y: float = 1.5,
+    max_dur: float = 35.0,
 ) -> pd.DataFrame:
     if df_moments.empty:
         return df_moments
 
-    scenes = detect_scenes(video_path)
     starts, ends, durs, vis_scores, final_scores = [], [], [], [], []
-
     for _, row in df_moments.iterrows():
-        ex_s = row.get("exchange_start", max(0.0, row["moment_x"] - 8.0))
-        ex_e = row.get("exchange_end", min(total_duration, row["moment_x"] + 8.0))
-        s, e = snap_exchange_boundaries(ex_s, ex_e, total_duration, scenes, pad_sec=min(buffer_y, 3.0))
+        ex_s = float(row.get("exchange_start", max(0.0, row["moment_x"] - 8.0)))
+        ex_e = float(row.get("exchange_end", min(total_duration, row["moment_x"] + 8.0)))
+        s = round(max(0.0, ex_s - buffer_y), 2)
+        e = round(min(total_duration, ex_e + buffer_y), 2)
+        if (e - s) > max_dur:
+            e = round(s + max_dur, 2)
+
         v_score = analyze_visual_cues(video_path, s, e)
         fused = round(0.80 * float(row["nlp_score"]) + 0.20 * v_score, 3)
 
