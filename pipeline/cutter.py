@@ -4,7 +4,6 @@ import pandas as pd
 
 
 def filter_non_overlapping(df: pd.DataFrame, max_clips: int = 5, top_n: int = None) -> pd.DataFrame:
-    """Selects top non-overlapping highlight windows ranked by multimodal score."""
     if df.empty:
         return df
 
@@ -25,7 +24,6 @@ def filter_non_overlapping(df: pd.DataFrame, max_clips: int = 5, top_n: int = No
 
 
 def extract_highlight_clips(video_path: str, df_highlights: pd.DataFrame, output_dir: Path) -> pd.DataFrame:
-    """Cuts each highlight window from the source video using FFmpeg."""
     if df_highlights.empty:
         return df_highlights
 
@@ -39,27 +37,17 @@ def extract_highlight_clips(video_path: str, df_highlights: pd.DataFrame, output
         out_file = output_dir / f"highlight_{idx + 1}_{cat}.mp4"
 
         cmd = [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            str(start_sec),
-            "-i",
-            video_path,
-            "-t",
-            str(duration_sec),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "23",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
+            "ffmpeg", "-y",
+            "-ss", str(start_sec),
+            "-i", video_path,
+            "-t", str(duration_sec),
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
             str(out_file),
-            "-loglevel",
-            "error",
+            "-loglevel", "error",
         ]
         subprocess.run(cmd, check=True)
         clip_paths.append(str(out_file))
