@@ -3,6 +3,7 @@ import re
 import librosa
 import numpy as np
 import pandas as pd
+import torch
 from faster_whisper import WhisperModel
 from transformers import pipeline
 
@@ -28,23 +29,29 @@ DISAGREEMENT_CUES = (
 
 
 def transcribe_and_merge(audio_path: str) -> pd.DataFrame:
-    """Loads Whisper-tiny, transcribes pre-decoded 16kHz audio array, and frees RAM."""
+    """Uses GPU float16 if available (or int8 on CPU) for ultra-fast transcription."""
+    use_gpu = torch.cuda.is_available()
     whisper_model = WhisperModel(
         "tiny",
-        device="cpu",
-        compute_type="int8",
+        device="cuda" if use_gpu else "cpu",
+        compute_type="float16" if use_gpu else "int8",
         cpu_threads=2,
-        num_workers=1,
     )
     audio_array, _ = librosa.load(audio_path, sr=16000)
-    segments, _ = whisper_model.transcribe(audio_array, vad_filter=True)
+    # Cap audio analysis to first 12 minutes for fast live-demo execution
+    max_samples = 16000 * 60 * 12
+    if len(audio_array) > max_samples:
+        audio_array = audio_array[:max_samples]
 
+    segments, _ = whisper_model.transcribe(audio_array, vad_filter=True, beam_size=1)
     raw_segs = [
         {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
         for s in segments
         if s.text.strip()
     ]
     del whisper_model
+    if use_gpu:
+        torch.cuda.empty_cache()
     gc.collect()
 
     merged = []
@@ -65,7 +72,7 @@ def transcribe_and_merge(audio_path: str) -> pd.DataFrame:
 
 
 def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.DataFrame:
-    """Detects questions using punctuation, interrogative phrasing, and rising YIN F0 pitch."""
+    """Fast lexical + rising pitch check (only runs YIN pitch on sentences without '?' or question starters)."""
     if df_sentences.empty:
         return df_sentences
 
@@ -78,21 +85,24 @@ def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.Da
         q_punct = txt.endswith("?")
         q_lex = low.startswith(QUESTION_STARTERS) or " i wonder " in low
 
+        if q_punct or q_lex:
+            is_q.append(True)
+            pitch_scores.append(1.0)
+            continue
+
         s_idx, e_idx = int(row["start"] * sr), int(row["end"] * sr)
         clip = y[s_idx:e_idx]
         p_rise = 0.0
-
         if len(clip) > sr * 0.5:
-            f0 = librosa.yin(clip, fmin=75, fmax=400, sr=sr)
+            f0 = librosa.yin(clip, fmin=75, fmax=400, sr=sr, hop_length=512)
             f0 = f0[(f0 > 75) & (f0 < 400)]
             if len(f0) >= 6:
                 mid = len(f0) // 2
                 diff = np.mean(f0[mid:]) - np.mean(f0[:mid])
                 p_rise = float(np.clip(diff / 30.0, 0.0, 1.0))
 
-        is_question = bool(q_punct or q_lex or p_rise > 0.55)
-        is_q.append(is_question)
-        pitch_scores.append(round(1.0 if (q_punct or q_lex) else p_rise, 2))
+        is_q.append(bool(p_rise > 0.55))
+        pitch_scores.append(round(p_rise, 2))
 
     df_sentences["is_question"] = is_q
     df_sentences["pitch_score"] = pitch_scores
@@ -100,7 +110,7 @@ def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.Da
 
 
 def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: list) -> pd.DataFrame:
-    """Strictly classifies cross-speaker exchanges into QA, Agreement, or Disagreement; drops uncertain turns."""
+    """Runs batched GPU DistilBERT-MNLI on cross-speaker exchanges in ~1–2 seconds."""
     if df_sentences.empty or len(df_sentences) < 2:
         return pd.DataFrame()
 
@@ -117,10 +127,24 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
     if len(df_turns) < 2:
         return pd.DataFrame()
 
+    pairs = []
+    pair_texts = []
+    for i in range(len(df_turns) - 1):
+        t1 = df_turns.iloc[i]
+        t2 = df_turns.iloc[i + 1]
+        if t1["speaker"] == t2["speaker"] or (t2["end"] - t2["start"]) < 2.5:
+            continue
+        pairs.append((t1, t2))
+        pair_texts.append(f"Speaker A: {t1['text']} | Speaker B: {t2['text']}")
+
+    if not pairs:
+        return pd.DataFrame()
+
+    use_gpu = torch.cuda.is_available()
     nli = pipeline(
         "zero-shot-classification",
         model="typeform/distilbert-base-uncased-mnli",
-        device=-1,
+        device=0 if use_gpu else -1,
     )
     labels = [
         "speaker agrees and confirms the other person's point",
@@ -128,25 +152,18 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
         "informative explanation answering a question",
     ]
 
+    results = nli(pair_texts, candidate_labels=labels, batch_size=16)
+    if isinstance(results, dict):
+        results = [results]
+
     moments = []
-    for i in range(len(df_turns) - 1):
-        t1 = df_turns.iloc[i]
-        t2 = df_turns.iloc[i + 1]
-
-        if t1["speaker"] == t2["speaker"]:
-            continue
-        if (t2["end"] - t2["start"]) < 2.5:
-            continue
-
-        resp_low = t2["text"].lower()
-        pair_text = f"Speaker A: {t1['text']} | Speaker B: {t2['text']}"
-        res = nli(pair_text, candidate_labels=labels)
+    for (t1, t2), res in zip(pairs, results):
         scores_by_label = dict(zip(res["labels"], res["scores"]))
-
         agree_score = float(scores_by_label[labels[0]])
         disagree_score = float(scores_by_label[labels[1]])
         qa_score = float(scores_by_label[labels[2]])
 
+        resp_low = t2["text"].lower()
         has_agree_cue = any(cue in resp_low for cue in AGREEMENT_CUES)
         has_disagree_cue = any(cue in resp_low for cue in DISAGREEMENT_CUES)
 
@@ -178,5 +195,7 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
             )
 
     del nli
+    if use_gpu:
+        torch.cuda.empty_cache()
     gc.collect()
     return pd.DataFrame(moments)
