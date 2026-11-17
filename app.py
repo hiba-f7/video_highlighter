@@ -10,7 +10,7 @@ from pipeline.vision import enrich_with_vision
 from pipeline.cutter import filter_non_overlapping, extract_highlight_clips
 
 st.set_page_config(
-    page_title="EchoFrame // Multimedia Archive",
+    page_title="EchoFrame | Multimodal Interview Highlight Extractor",
     page_icon="🎬",
     layout="wide",
 )
@@ -37,8 +37,8 @@ st.markdown(
         background: #F7E0E0;
         border-bottom: 2px solid #2E5968;
         border-radius: 10px 10px 0 0;
-        padding: 16px 24px;
-        margin-bottom: 22px;
+        padding: 18px 24px;
+        margin-bottom: 24px;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -47,26 +47,9 @@ st.markdown(
         font-family: 'Plus Jakarta Sans', sans-serif;
         font-size: 1.35rem;
         font-weight: 700;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.06em;
         color: #18313A !important;
         margin: 0;
-    }
-    .masthead-sub {
-        font-size: 0.78rem;
-        text-transform: uppercase;
-        letter-spacing: 0.14em;
-        color: #2E5968 !important;
-        font-weight: 700;
-    }
-
-    /* Centered Editorial Control Pill Bar */
-    .control-bar {
-        background: #F7E0E0 !important;
-        border: 1.5px solid #C8B9B1;
-        border-radius: 14px;
-        padding: 16px 22px;
-        margin-bottom: 28px;
-        box-shadow: 0 4px 16px rgba(46, 89, 104, 0.06);
     }
 
     /* Section Headings */
@@ -118,7 +101,7 @@ st.markdown(
         margin-bottom: 4px;
     }
 
-    /* Buttons */
+    /* Primary Button: High-Contrast Light Text (#FFFFFF / #FBF7F6) on Deep Slate Teal */
     div.stButton > button[kind="primary"] {
         background: #2E5968 !important;
         border: 1px solid #2E5968 !important;
@@ -127,10 +110,18 @@ st.markdown(
         border-radius: 8px !important;
         padding: 8px 18px !important;
     }
+    div.stButton > button[kind="primary"] *,
+    div.stButton > button[kind="primary"] p,
+    div.stButton > button[kind="primary"] span {
+        color: #FFFFFF !important;
+        font-weight: 600 !important;
+    }
     div.stButton > button[kind="primary"]:hover {
         background: #18313A !important;
         border-color: #18313A !important;
     }
+
+    /* Secondary Pill Buttons */
     div.stButton > button[kind="secondary"] {
         background: #FBF7F6 !important;
         border: 1.5px solid #2E5968 !important;
@@ -140,8 +131,18 @@ st.markdown(
         font-size: 0.78rem !important;
         padding: 4px 14px !important;
     }
+    div.stButton > button[kind="secondary"] *,
+    div.stButton > button[kind="secondary"] p,
+    div.stButton > button[kind="secondary"] span {
+        color: #18313A !important;
+    }
     div.stButton > button[kind="secondary"]:hover {
         background: #2E5968 !important;
+        color: #FFFFFF !important;
+    }
+    div.stButton > button[kind="secondary"]:hover *,
+    div.stButton > button[kind="secondary"]:hover p,
+    div.stButton > button[kind="secondary"]:hover span {
         color: #FFFFFF !important;
     }
 
@@ -151,7 +152,7 @@ st.markdown(
         border: 1px solid #C8B9B1 !important;
         border-radius: 8px !important;
     }
-    label, span, p {
+    label, .stRadio span, .stSlider span {
         color: #18313A !important;
     }
     </style>
@@ -159,19 +160,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Top Masthead
+# Top Masthead (Clean Multimodal Title, No Right Subtitle)
 st.markdown(
     """
     <div class="masthead">
-        <div class="masthead-title">ECHOFRAME // MULTIMEDIA ARCHIVE</div>
-        <div class="masthead-sub">30s–60s Complete-Sentence Edition</div>
+        <div class="masthead-title">ECHOFRAME: MULTIMODAL INTERVIEW HIGHLIGHT EXTRACTOR</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 # Horizontal Control Bar
-st.markdown('<div class="control-bar">', unsafe_allow_html=True)
 c_mode, c_input, c_max, c_action = st.columns([1.3, 3.2, 1.3, 1.3])
 
 with c_mode:
@@ -199,7 +198,8 @@ with c_max:
 with c_action:
     st.write("<div style='height: 6px;'></div>", unsafe_allow_html=True)
     run_btn = st.button("Extract Highlights", type="primary", use_container_width=True)
-st.markdown("</div>", unsafe_allow_html=True)
+
+st.write("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
 # Session State Initialization
 if "selected_clip_path" not in st.session_state:
@@ -231,7 +231,7 @@ if run_btn:
     work_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with st.spinner("Running Multimodal Archive Pipeline (Whisper-tiny + WavLM + DistilBERT-MNLI)..."):
+    with st.spinner("Running Multimodal Highlight Pipeline (Whisper-tiny + WavLM + DistilBERT-MNLI)..."):
         if input_mode == "YouTube URL":
             video_path = download_youtube_video(youtube_url.strip(), work_dir)
         else:
@@ -327,7 +327,7 @@ with col_stage:
             unsafe_allow_html=True,
         )
 
-    # Pill Selector Buttons Beneath the Video Player (Matches Concept 1 Image)
+    # Pill Selector Buttons Beneath the Video Player
     all_clips = st.session_state.get("all_clips", [])
     if all_clips:
         st.write("<div style='height: 8px;'></div>", unsafe_allow_html=True)
@@ -372,7 +372,7 @@ with col_index:
 
         if df_cat.empty:
             st.markdown(
-                "<div style='font-size:0.84rem; color:#5C7680; margin-bottom:14px; font-style:italic;'>No verified 30s–60s exchanges in this category.</div>",
+                "<div style='font-size:0.84rem; color:#5C7680; margin-bottom:14px; font-style:italic;'>No verified exchanges in this category.</div>",
                 unsafe_allow_html=True,
             )
         else:
