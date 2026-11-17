@@ -8,7 +8,7 @@ from transformers import AutoFeatureExtractor, WavLMForXVector
 
 
 def assign_speakers(df_sentences: pd.DataFrame, audio_path: str, n_speakers: int = 2) -> pd.DataFrame:
-    """Extracts WavLM speaker embeddings using max 6s audio windows (prevents CUDA OOM), clusters via KMeans."""
+    """Extracts WavLM speaker embeddings using max 6s windows (prevents CUDA OOM), clusters via KMeans."""
     if df_sentences.empty:
         return df_sentences
 
@@ -25,7 +25,7 @@ def assign_speakers(df_sentences: pd.DataFrame, audio_path: str, n_speakers: int
 
     y, sr = librosa.load(audio_path, sr=16000)
     embeddings = []
-    max_len = sr * 6  # 6 seconds max per embedding prevents O(N^2) attention VRAM spikes
+    max_len = sr * 6  # 6-second cap prevents O(N^2) attention VRAM spikes on long turns
 
     with torch.no_grad():
         for _, row in df_sentences.iterrows():
