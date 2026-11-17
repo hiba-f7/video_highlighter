@@ -19,7 +19,7 @@ AGREEMENT_CUES = (
     "i agree", "totally agree", "completely agree", "exactly", "precisely",
     "that's right", "that is right", "you're right", "you are right",
     "absolutely", "definitely", "for sure", "of course", "makes sense",
-    "i think so too", "same here", "spot on", "fair enough", "true,", "yes,", "yeah,",
+    "i think so too", "same here", "spot on", "fair enough",
 )
 
 DISAGREEMENT_CUES = (
@@ -139,16 +139,13 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
         t1 = turns[i]
         t2 = turns[i + 1]
 
-        # Must be two different speakers
         if t1["speaker"] == t2["speaker"]:
             continue
 
-        # Reject segments separated by intro/theme music (> 4.5s silence/music gap)
         silence_gap = float(t2["start"]) - float(t1["end"])
         if silence_gap > 4.5 or silence_gap < -0.5:
             continue
 
-        # Reject short host greetings/intros
         if (t2["end"] - t2["start"]) < 4.0:
             continue
         if any(phrase in t2["text"].lower() for phrase in INTRO_NOISE) or any(
@@ -156,11 +153,9 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
         ):
             continue
 
-        # Start with up to last 2 complete sentences of Speaker 1
         t1_sents = t1["sentences"][-2:]
         ex_start = float(t1_sents[0]["start"])
 
-        # Add complete sentences from Speaker 2 to reach 30s–60s cleanly
         t2_sents = []
         for s in t2["sentences"]:
             if (float(s["end"]) - ex_start) > 58.0 and t2_sents:
@@ -169,7 +164,6 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
             if (float(s["end"]) - ex_start) >= 32.0:
                 break
 
-        # If still under 30s, include complete sentences from following turns if continuous
         curr_turn_idx = i + 2
         while (float(t2_sents[-1]["end"]) - ex_start) < 30.0 and curr_turn_idx < len(turns):
             next_t = turns[curr_turn_idx]
@@ -221,22 +215,22 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
         disagree_score = float(scores[labels[1]])
         qa_score = float(scores[labels[2]])
 
-        resp_low = resp_text.lower()
-        has_agree_cue = any(cue in resp_low for cue in AGREEMENT_CUES)
-        has_disagree_cue = any(cue in resp_low for cue in DISAGREEMENT_CUES)
+        resp_opening = resp_text[:160].lower()
+        has_agree_cue = any(cue in resp_opening for cue in AGREEMENT_CUES)
+        has_disagree_cue = any(cue in resp_opening for cue in DISAGREEMENT_CUES)
 
         category = None
         final_conf = 0.0
 
-        if (has_agree_cue and agree_score >= 0.42) or agree_score >= 0.62:
+        if has_agree_cue or (not trig_is_q and agree_score >= 0.58):
             category = "Agreement"
-            final_conf = round(min(0.99, agree_score + (0.15 if has_agree_cue else 0.0)), 3)
-        elif trig_is_q and disagree_score < 0.72:
+            final_conf = round(min(0.99, agree_score + (0.18 if has_agree_cue else 0.0)), 3)
+        elif trig_is_q and not has_disagree_cue and disagree_score < 0.85:
             category = "QA"
-            final_conf = round(min(0.99, max(0.58, qa_score + 0.18)), 3)
-        elif (has_disagree_cue and disagree_score >= 0.45) or disagree_score >= 0.58:
+            final_conf = round(min(0.99, max(0.62, qa_score + 0.22)), 3)
+        elif has_disagree_cue or disagree_score >= 0.52:
             category = "Disagreement"
-            final_conf = round(min(0.99, disagree_score + (0.10 if has_disagree_cue else 0.0)), 3)
+            final_conf = round(min(0.99, disagree_score + (0.12 if has_disagree_cue else 0.0)), 3)
 
         if category and category in selected_categories and final_conf >= 0.50:
             moments.append(
