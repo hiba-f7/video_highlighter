@@ -1,1 +1,1 @@
-# pipeline/__init__.py
+# EchoFrame Multimodal Pipeline Package
