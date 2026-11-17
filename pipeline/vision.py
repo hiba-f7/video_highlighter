@@ -58,20 +58,25 @@ def enrich_with_vision(
     df_moments: pd.DataFrame,
     video_path: str,
     total_duration: float,
-    buffer_y: float = 1.0,
+    buffer_y: float = 0.8,
 ) -> pd.DataFrame:
-    """Aligns clip start/end directly to the exact transcribed exchange without any arbitrary 35s cutoff."""
+    """Preserves complete-sentence boundaries within 30s–60s without cutting words."""
     if df_moments.empty:
         return df_moments
 
     starts, ends, durs, vis_scores, final_scores = [], [], [], [], []
     for _, row in df_moments.iterrows():
-        ex_s = float(row.get("exchange_start", max(0.0, row["moment_x"] - 6.0)))
-        ex_e = float(row.get("exchange_end", min(total_duration, row["moment_x"] + 6.0)))
+        ex_s = float(row.get("exchange_start", max(0.0, row["moment_x"] - 15.0)))
+        ex_e = float(row.get("exchange_end", min(total_duration, row["moment_x"] + 15.0)))
 
-        # Start 0.4s before first word of Trigger; end 1.0s after last word of Response
         s = round(max(0.0, ex_s - 0.4), 2)
         e = round(min(total_duration, ex_e + buffer_y), 2)
+
+        if (e - s) < 30.0:
+            needed = 30.0 - (e - s)
+            e = round(min(total_duration, e + needed), 2)
+        if (e - s) > 60.0:
+            e = round(s + 60.0, 2)
 
         v_score = analyze_visual_cues(video_path, s, e)
         fused = round(0.85 * float(row["nlp_score"]) + 0.15 * v_score, 3)
