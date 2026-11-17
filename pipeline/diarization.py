@@ -25,7 +25,7 @@ def assign_speakers(df_sentences: pd.DataFrame, audio_path: str, n_speakers: int
 
     y, sr = librosa.load(audio_path, sr=16000)
     embeddings = []
-    max_len = sr * 6  # 6-second cap prevents O(N^2) attention VRAM spikes on long turns
+    max_len = sr * 6
 
     with torch.no_grad():
         for _, row in df_sentences.iterrows():
