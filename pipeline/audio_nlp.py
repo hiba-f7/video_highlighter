@@ -19,7 +19,7 @@ AGREEMENT_CUES = (
     "i agree", "totally agree", "completely agree", "exactly", "precisely",
     "that's right", "that is right", "you're right", "you are right",
     "absolutely", "definitely", "for sure", "of course", "makes sense",
-    "i think so too", "same here", "spot on", "fair enough", "true,", "yes,", "yeah,",
+    "i think so too", "same here", "spot on", "fair enough",
 )
 
 DISAGREEMENT_CUES = (
@@ -35,9 +35,9 @@ INTRO_NOISE = (
 
 
 def transcribe_and_merge(audio_path: str) -> pd.DataFrame:
-    """Transcribes audio with Whisper-tiny (int8 CPU mode) and splits strictly at sentence punctuation."""
+    """Transcribes audio with Whisper-tiny (int8 CPU mode) and splits at sentence punctuation (or 18s max)."""
     audio_array, _ = librosa.load(audio_path, sr=16000)
-    max_samples = 16000 * 60 * 10
+    max_samples = 16000 * 60 * 12
     if len(audio_array) > max_samples:
         audio_array = audio_array[:max_samples]
 
@@ -58,7 +58,8 @@ def transcribe_and_merge(audio_path: str) -> pd.DataFrame:
             buf_start = seg["start"]
         buf_text = (buf_text + " " + seg["text"]).strip()
         buf_end = seg["end"]
-        if re.search(r"[.?!]$", buf_text):
+        # Split on sentence punctuation, or at segment boundary if unpunctuated run exceeds 18s
+        if re.search(r"[.?!]$", buf_text) or (buf_end - buf_start) >= 18.0:
             merged.append({"start": buf_start, "end": buf_end, "text": buf_text})
             buf_text, buf_start, buf_end = "", None, None
 
@@ -81,7 +82,10 @@ def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.Da
         low = txt.lower()
         q_punct = "?" in txt
         q_lex = low.startswith(QUESTION_PHRASES) or any(
-            k in low for k in ("i wonder", "why you", "why are", "how do", "what do", "do you", "are you", "isn't it")
+            k in low for k in (
+                "i wonder", "why you", "why are", "how do", "what do",
+                "do you", "are you", "isn't it", "what is", "how is",
+            )
         )
 
         if q_punct or q_lex:
@@ -109,17 +113,16 @@ def detect_pitch_questions(df_sentences: pd.DataFrame, audio_path: str) -> pd.Da
 
 
 def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: list) -> pd.DataFrame:
-    """Builds 30s–60s complete-sentence speaker exchanges and rejects music gaps/intros."""
+    """Builds 30s–60s complete-sentence speaker exchanges and prioritizes Q&A when a question is asked."""
     if df_sentences.empty or len(df_sentences) < 2:
         return pd.DataFrame()
 
-    # Merge consecutive sentences by same speaker ONLY if pause between them <= 3.0s
     turns = []
     for _, row in df_sentences.iterrows():
         if (
             turns
             and turns[-1]["speaker"] == row["speaker"]
-            and (float(row["start"]) - float(turns[-1]["end"])) <= 3.0
+            and (float(row["start"]) - float(turns[-1]["end"])) <= 3.5
         ):
             turns[-1]["end"] = row["end"]
             turns[-1]["text"] += " " + row["text"]
@@ -139,28 +142,23 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
         t1 = turns[i]
         t2 = turns[i + 1]
 
-        # Must be two different speakers
         if t1["speaker"] == t2["speaker"]:
             continue
 
-        # Reject segments separated by intro/theme music (> 4.5s silence/music gap)
         silence_gap = float(t2["start"]) - float(t1["end"])
         if silence_gap > 4.5 or silence_gap < -0.5:
             continue
 
-        # Reject short host greetings/intros
-        if (t2["end"] - t2["start"]) < 4.0:
+        if (t2["end"] - t2["start"]) < 3.0:
             continue
         if any(phrase in t2["text"].lower() for phrase in INTRO_NOISE) or any(
             phrase in t1["text"].lower() for phrase in INTRO_NOISE
         ):
             continue
 
-        # Start with up to last 2 complete sentences of Speaker 1
         t1_sents = t1["sentences"][-2:]
         ex_start = float(t1_sents[0]["start"])
 
-        # Add complete sentences from Speaker 2 to reach 30s–60s cleanly
         t2_sents = []
         for s in t2["sentences"]:
             if (float(s["end"]) - ex_start) > 58.0 and t2_sents:
@@ -169,9 +167,8 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
             if (float(s["end"]) - ex_start) >= 32.0:
                 break
 
-        # If still under 30s, include complete sentences from following turns if continuous
         curr_turn_idx = i + 2
-        while (float(t2_sents[-1]["end"]) - ex_start) < 30.0 and curr_turn_idx < len(turns):
+        while (float(t2_sents[-1]["end"]) - ex_start) < 28.0 and curr_turn_idx < len(turns):
             next_t = turns[curr_turn_idx]
             if (float(next_t["start"]) - float(t2_sents[-1]["end"])) > 4.5:
                 break
@@ -184,8 +181,7 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
             curr_turn_idx += 1
 
         ex_end = float(t2_sents[-1]["end"])
-        dur = ex_end - ex_start
-        if dur < 24.0 or dur > 60.0:
+        if (ex_end - ex_start) < 12.0:
             continue
 
         trig_text = " ".join(s["text"] for s in t1_sents)
@@ -228,15 +224,25 @@ def detect_highlight_moments(df_sentences: pd.DataFrame, selected_categories: li
         category = None
         final_conf = 0.0
 
-        if (has_agree_cue and agree_score >= 0.42) or agree_score >= 0.62:
-            category = "Agreement"
-            final_conf = round(min(0.99, agree_score + (0.15 if has_agree_cue else 0.0)), 3)
-        elif trig_is_q and disagree_score < 0.72:
-            category = "QA"
-            final_conf = round(min(0.99, max(0.58, qa_score + 0.18)), 3)
-        elif (has_disagree_cue and disagree_score >= 0.45) or disagree_score >= 0.58:
+        # 1. Explicit Disagreement / Rebuttal
+        if (has_disagree_cue and disagree_score >= 0.42) or disagree_score >= 0.65:
             category = "Disagreement"
-            final_conf = round(min(0.99, disagree_score + (0.10 if has_disagree_cue else 0.0)), 3)
+            final_conf = round(min(0.99, disagree_score + (0.12 if has_disagree_cue else 0.0)), 3)
+
+        # 2. Explicit Agreement phrase ("I agree", "You're right", "Exactly")
+        elif has_agree_cue and agree_score >= 0.40:
+            category = "Agreement"
+            final_conf = round(min(0.99, agree_score + 0.15), 3)
+
+        # 3. Question & Answer (checked BEFORE generic NLI agreement so questions aren't hijacked!)
+        elif trig_is_q:
+            category = "QA"
+            final_conf = round(min(0.99, max(0.62, qa_score + 0.20)), 3)
+
+        # 4. Non-question Consensus / Agreement
+        elif agree_score >= 0.55:
+            category = "Agreement"
+            final_conf = round(min(0.99, agree_score), 3)
 
         if category and category in selected_categories and final_conf >= 0.50:
             moments.append(
