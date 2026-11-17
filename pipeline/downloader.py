@@ -41,12 +41,11 @@ def download_youtube_video(url: str, work_dir: Path) -> str:
     if result.returncode == 0 and video_path.exists():
         return str(video_path)
 
-    # Show clean UI message in Streamlit instead of crashing with a redacted RuntimeError
     try:
         import streamlit as st
         st.warning(
-            "**YouTube blocked Streamlit Cloud's server IP** for direct URL downloading. "
-            "Switch to **Upload MP4 Clip** in the sidebar on this hosted link, or run via Google Colab / locally to paste YouTube URLs directly."
+            "**YouTube blocked this cloud server IP** for direct URL downloading. "
+            "Switch to **Upload MP4 Clip** in the top control bar on this hosted link, or run via Google Colab / locally to paste YouTube URLs directly."
         )
         st.stop()
     except ImportError:
